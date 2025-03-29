@@ -284,6 +284,97 @@
             }
         }
         
+        // Функция для отладки SDP данных
+        function debugSessionData(data) {
+            console.log("Session data type:", typeof data);
+            console.log("Session data:", data);
+            
+            try {
+                if (typeof data === 'string') {
+                    const parsed = JSON.parse(data);
+                    console.log("Parsed data:", parsed);
+                    
+                    if (parsed.sdp) {
+                        if (typeof parsed.sdp === 'string') {
+                            console.log("SDP is a string, format looks correct");
+                        } else if (typeof parsed.sdp === 'object') {
+                            console.log("SDP is an object:", parsed.sdp);
+                            if (parsed.sdp.sdp && typeof parsed.sdp.sdp === 'string') {
+                                console.log("Nested SDP found, might need unwrapping");
+                            }
+                        }
+                    } else {
+                        console.log("No SDP property found in parsed data");
+                    }
+                }
+            } catch (e) {
+                console.error("Error during debug:", e);
+            }
+        }
+        
+        // Функция для обработки полученного SDP
+        function processReceivedSDP(receivedData) {
+            try {
+                let sessionData;
+                
+                // Пробуем разобрать JSON, если это строка
+                if (typeof receivedData === 'string') {
+                    try {
+                        sessionData = JSON.parse(receivedData);
+                    } catch (e) {
+                        console.error('JSON parse error:', e);
+                        return { success: false, error: 'Ошибка при разборе JSON' };
+                    }
+                } else {
+                    sessionData = receivedData;
+                }
+                
+                // Проверяем наличие необходимых полей
+                if (!sessionData) {
+                    return { success: false, error: 'Пустые данные сессии' };
+                }
+                
+                let sdpData;
+                
+                // Обрабатываем разные форматы SDP
+                if (sessionData.sdp && typeof sessionData.sdp === 'object') {
+                    // Вложенный SDP объект: { type: 'offer', sdp: { type: 'offer', sdp: '...' } }
+                    sdpData = sessionData.sdp;
+                } else if (sessionData.type && sessionData.sdp && typeof sessionData.sdp === 'string') {
+                    // Прямой SDP: { type: 'offer', sdp: '...' }
+                    sdpData = sessionData;
+                } else {
+                    console.error('Неподдерживаемый формат SDP:', sessionData);
+                    return { success: false, error: 'Неподдерживаемый формат SDP данных' };
+                }
+                
+                return { success: true, sdp: sdpData };
+            } catch (error) {
+                console.error('Ошибка при обработке SDP:', error);
+                return { success: false, error: error.message };
+            }
+        }
+        
+        // Функция ожидания сбора ICE кандидатов
+        function waitForIceCandidates() {
+            return new Promise(resolve => {
+                if (peerConnection.iceGatheringState === 'complete') {
+                    resolve();
+                } else {
+                    function checkState() {
+                        if (peerConnection.iceGatheringState === 'complete') {
+                            peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                            resolve();
+                        }
+                    }
+                    peerConnection.addEventListener('icegatheringstatechange', checkState);
+                    
+                    // Таймаут на случай, если не все кандидаты собрались
+                    setTimeout(resolve, 5000);
+                }
+            });
+        }
+        
         // Создание предложения и начало звонка
         async function startCall() {
             const targetSessionId = sessionInput.value.trim();
@@ -303,6 +394,9 @@
                 // Создаем предложение (offer)
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
+                
+                // Подождем, пока все ICE кандидаты будут собраны
+                await waitForIceCandidates();
                 
                 // Формируем и показываем наше предложение для передачи собеседнику
                 localSessionDescription = JSON.stringify({
@@ -332,14 +426,19 @@
                 return;
             }
             
+            // Отлаживаем полученные данные
+            debugSessionData(receivedSession);
+            
             try {
-                // Парсим полученное предложение
-                const sessionData = JSON.parse(receivedSession);
+                // Обрабатываем полученные SDP данные
+                const processResult = processReceivedSDP(receivedSession);
                 
-                if (!sessionData || !sessionData.sdp) {
-                    updateStatus('Неверный формат данных сессии');
+                if (!processResult.success) {
+                    updateStatus(`Ошибка обработки данных сессии: ${processResult.error}`);
                     return;
                 }
+                
+                const sdpData = processResult.sdp;
                 
                 createPeerConnection();
                 
@@ -349,11 +448,14 @@
                 });
                 
                 // Устанавливаем удаленное описание из предложения
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(sessionData.sdp));
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(sdpData));
                 
                 // Создаем ответ
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
+                
+                // Подождем, пока все ICE кандидаты будут собраны
+                await waitForIceCandidates();
                 
                 // Формируем и показываем наш ответ для передачи звонящему
                 localSessionDescription = JSON.stringify({
